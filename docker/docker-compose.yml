@@ -1,0 +1,249 @@
+version: '3.8'
+
+services:
+  # Spark Master
+  spark-master:
+    image: apache/spark:3.5.0-scala2.12-java17-ubuntu
+    container_name: quickchat-spark-master
+    hostname: spark-master
+    ports:
+      - "8080:8080"   # Spark Master Web UI
+      - "7077:7077"   # Spark Master Port
+      - "4040:4040"   # Spark Application UI
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+    volumes:
+      - spark-logs:/opt/spark/logs
+      - ./spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - data-lake:/data/lake
+    command: /opt/spark/sbin/start-master.sh
+    networks:
+      - quickchat-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Spark Worker 1
+  spark-worker-1:
+    image: apache/spark:3.5.0-scala2.12-java17-ubuntu
+    container_name: quickchat-spark-worker-1
+    hostname: spark-worker-1
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_WEBUI_PORT=8081
+    volumes:
+      - spark-logs:/opt/spark/logs
+      - ./spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - data-lake:/data/lake
+    command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077
+    networks:
+      - quickchat-network
+
+  # Spark Worker 2
+  spark-worker-2:
+    image: apache/spark:3.5.0-scala2.12-java17-ubuntu
+    container_name: quickchat-spark-worker-2
+    hostname: spark-worker-2
+    depends_on:
+      - spark-master
+    ports:
+      - "8082:8081"
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_WEBUI_PORT=8081
+    volumes:
+      - spark-logs:/opt/spark/logs
+      - ./spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - data-lake:/data/lake
+    command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077
+    networks:
+      - quickchat-network
+
+  # MinIO (S3-compatible storage for Data Lake)
+  minio:
+    image: minio/minio:latest
+    container_name: quickchat-minio
+    hostname: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - quickchat-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MinIO Client - Create buckets
+  minio-setup:
+    image: minio/mc:latest
+    container_name: quickchat-minio-setup
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 minioadmin minioadmin123;
+      mc mb myminio/quickchat-data-lake --ignore-existing;
+      mc mb myminio/quickchat-data-lake/bronze --ignore-existing;
+      mc mb myminio/quickchat-data-lake/silver --ignore-existing;
+      mc mb myminio/quickchat-data-lake/gold --ignore-existing;
+      mc mb myminio/quickchat-data-lake/checkpoints --ignore-existing;
+      echo 'Buckets created successfully';
+      exit 0;
+      "
+    networks:
+      - quickchat-network
+
+  # Kafka (for streaming)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: quickchat-zookeeper
+    hostname: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - quickchat-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: quickchat-kafka
+    hostname: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - quickchat-network
+
+  # Kafka UI
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: quickchat-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: quickchat
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - quickchat-network
+
+  # Spark History Server
+  spark-history:
+    image: apache/spark:3.5.0-scala2.12-java17-ubuntu
+    container_name: quickchat-spark-history
+    hostname: spark-history
+    depends_on:
+      - spark-master
+    ports:
+      - "18080:18080"
+    environment:
+      - SPARK_HISTORY_OPTS=-Dspark.history.fs.logDirectory=/opt/spark/logs -Dspark.history.ui.port=18080
+    volumes:
+      - spark-logs:/opt/spark/logs
+    command: /opt/spark/sbin/start-history-server.sh
+    networks:
+      - quickchat-network
+
+  # Apache Airflow (Job Orchestration)
+  airflow-webserver:
+    image: apache/airflow:2.7.3
+    container_name: quickchat-airflow
+    hostname: airflow
+    depends_on:
+      - airflow-init
+    ports:
+      - "8085:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__CORE__FERNET_KEY=your-fernet-key-here
+      - AIRFLOW__WEBSERVER__SECRET_KEY=your-secret-key-here
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    volumes:
+      - ../scripts/airflow/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+    command: webserver
+    networks:
+      - quickchat-network
+
+  airflow-scheduler:
+    image: apache/airflow:2.7.3
+    container_name: quickchat-airflow-scheduler
+    depends_on:
+      - airflow-webserver
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__CORE__FERNET_KEY=your-fernet-key-here
+    volumes:
+      - ../scripts/airflow/dags:/opt/airflow/dags
+      - airflow-logs:/opt/airflow/logs
+    command: scheduler
+    networks:
+      - quickchat-network
+
+  airflow-init:
+    image: apache/airflow:2.7.3
+    container_name: quickchat-airflow-init
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__CORE__FERNET_KEY=your-fernet-key-here
+    volumes:
+      - airflow-logs:/opt/airflow/logs
+    entrypoint: >
+      /bin/bash -c "
+      airflow db init;
+      airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com;
+      "
+    networks:
+      - quickchat-network
+
+volumes:
+  spark-logs:
+  data-lake:
+  minio-data:
+  airflow-logs:
+
+networks:
+  quickchat-network:
+    driver: bridge
+    name: quickchat-network
