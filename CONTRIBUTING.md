@@ -1,6 +1,6 @@
-# Contributing to QuikApp
+# Contributing to QuckApp
 
-Thank you for your interest in contributing to QuikApp! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to QuckApp! This document provides guidelines and instructions for contributing.
 
 ## Code of Conduct
 
@@ -21,8 +21,8 @@ By participating in this project, you agree to maintain a respectful and inclusi
 
 ```bash
 # Clone with submodules
-git clone --recurse-submodules https://github.com/quikapp-dev/quikapp.git
-cd quikapp
+git clone --recurse-submodules https://github.com/quckapp/quckapp.git
+cd quckapp
 
 # Start infrastructure
 cd infrastructure/docker
@@ -157,7 +157,7 @@ mix test
 ## Project Structure
 
 ```
-QuikApp/
+QuckApp/
 ├── admin/           # Admin dashboard (React)
 ├── docs/            # Documentation (Docusaurus)
 ├── infrastructure/  # DevOps & IaC
@@ -196,4 +196,4 @@ By contributing, you agree that your contributions will be licensed under the MI
 
 ---
 
-Thank you for contributing to QuikApp!
+Thank you for contributing to QuckApp!
