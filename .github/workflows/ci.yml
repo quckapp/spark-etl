@@ -1,0 +1,134 @@
+# =============================================================================
+# CI - spark-etl (Scala / Apache Spark)
+# =============================================================================
+# Lint, test, build, and push Docker image to Azure Container Registry
+# =============================================================================
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SERVICE_NAME: spark-etl
+  JAVA_VERSION: '17'
+  SCALA_VERSION: '2.13'
+
+jobs:
+  # ===========================================================================
+  # Build & Test
+  # ===========================================================================
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: sbt
+
+      - name: Compile
+        run: sbt compile
+
+      - name: Run tests
+        run: sbt test
+
+      - name: Build assembly JAR
+        run: sbt assembly
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-etl-assembly
+          path: target/scala-${{ env.SCALA_VERSION }}/*-assembly-*.jar
+          retention-days: 7
+
+  # ===========================================================================
+  # Docker Build & Push
+  # ===========================================================================
+  docker-push:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: sbt
+
+      - name: Build assembly JAR
+        run: sbt assembly
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ secrets.ACR_NAME }}
+
+      - name: Set image tag
+        id: tag
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "image=${{ secrets.ACR_LOGIN_SERVER }}/quckapp/${{ env.SERVICE_NAME }}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.image }}:main-${{ steps.tag.outputs.short_sha }}
+            ${{ steps.tag.outputs.image }}:latest
+
+      - name: Notify root repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.ROOT_REPO_PAT }}
+          repository: quckapp/quckapp
+          event-type: service-image-pushed
+          client-payload: >-
+            {
+              "service": "${{ env.SERVICE_NAME }}",
+              "tag": "main-${{ steps.tag.outputs.short_sha }}",
+              "sha": "${{ github.sha }}",
+              "actor": "${{ github.actor }}"
+            }
+
+      - name: Summary
+        run: |
+          echo "### Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ steps.tag.outputs.image }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`main-${{ steps.tag.outputs.short_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
